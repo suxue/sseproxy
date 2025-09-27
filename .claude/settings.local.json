@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(./sseproxy)",
+      "Bash(timeout:*)",
+      "Bash(ls:*)",
+      "Bash(./test.sh:*)",
+      "mcp__sequential-thinking__sequentialthinking",
+      "Bash(pkill:*)",
+      "Bash(git add:*)",
+      "Bash(git rm:*)",
+      "Bash(git commit:*)"
+    ],
+    "deny": []
+  }
+}
