@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/http/httputil"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -68,20 +67,6 @@ type streamProbe struct {
 	Stream *bool `json:"stream"`
 }
 
-type flushingWriter struct {
-	w          http.ResponseWriter
-	flusher    http.Flusher
-	firstWrite *bool
-}
-
-func (fw *flushingWriter) Write(p []byte) (int, error) {
-	if !*fw.firstWrite && len(p) > 0 {
-		*fw.firstWrite = true
-	}
-	n, err := fw.w.Write(p)
-	fw.flusher.Flush()
-	return n, err
-}
 
 func main() {
 	flag.Parse()
@@ -149,14 +134,7 @@ func main() {
 		upReq.Header = r.Header.Clone()
 		stripHopByHop(upReq.Header)
 
-		if os.Getenv("SSEPROXY_DUMP") == "1" {
-			if dump, err := httputil.DumpRequestOut(upReq, false); err == nil {
-				log.Printf(">>> upstream request:\n%s", dump)
-			}
-		}
-
 		if !streaming {
-			// Non-streaming: simple pass-through.
 			upResp, err := client.Do(upReq)
 			if err != nil {
 				http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
@@ -166,13 +144,11 @@ func main() {
 
 			copyHeaders(w.Header(), upResp.Header)
 			stripHopByHop(w.Header())
-			w.Header().Set("X-Accel-Buffering", "no")
 			w.WriteHeader(upResp.StatusCode)
 			_, _ = io.Copy(w, upResp.Body)
 			return
 		}
 
-		// STREAMING: respond immediately (before upstream headers) to beat TTFB limits.
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, "streaming not supported (no flusher)", http.StatusInternalServerError)
@@ -183,13 +159,10 @@ func main() {
 		h.Set("Content-Type", "text/event-stream")
 		h.Set("Cache-Control", "no-cache")
 		h.Set("Connection", "keep-alive")
-		h.Set("X-Accel-Buffering", "no")
 		stripHopByHop(h)
 
 		// We intentionally return 200 now; upstream errors will be sent as SSE "error" event.
 		w.WriteHeader(http.StatusOK)
-
-		firstUpstreamByte := false
 
 		// Immediate first byte + start heartbeat ticker
 		_, _ = w.Write([]byte(": ping\n\n"))
@@ -198,7 +171,9 @@ func main() {
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
+		heartbeatDone := make(chan struct{})
 		go func() {
+			defer close(heartbeatDone)
 			t := time.NewTicker(*heartbeatFlag)
 			defer t.Stop()
 			for {
@@ -206,9 +181,6 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-t.C:
-					if firstUpstreamByte {
-						return
-					}
 					_, _ = w.Write([]byte(": ping\n\n"))
 					flusher.Flush()
 				}
@@ -240,6 +212,10 @@ func main() {
 			return
 
 		case err := <-upErrCh:
+			// Stop heartbeat and wait for it to finish
+			cancel()
+			<-heartbeatDone
+
 			// Surface upstream dial error via SSE event and end.
 			payload, _ := json.Marshal(map[string]string{"error": err.Error()})
 			w.Write([]byte("event: error\n"))
@@ -249,6 +225,10 @@ func main() {
 
 		case upResp := <-upRespCh:
 			defer upResp.Body.Close()
+
+			// Stop heartbeat and wait for it to finish before sending real data
+			cancel()
+			<-heartbeatDone
 
 			log.Printf("upstream response: status=%d, content-type=%s", upResp.StatusCode, upResp.Header.Get("Content-Type"))
 
@@ -265,9 +245,8 @@ func main() {
 				return
 			}
 
-			// Pipe upstream body → client; mark first upstream byte on first write.
-			fw := &flushingWriter{w: w, flusher: flusher, firstWrite: &firstUpstreamByte}
-			bytesWritten, copyErr := io.Copy(fw, upResp.Body)
+			// Pipe upstream body → client
+			bytesWritten, copyErr := io.Copy(w, upResp.Body)
 			log.Printf("copied %d bytes from upstream, error: %v", bytesWritten, copyErr)
 
 			// Graceful end marker
@@ -285,7 +264,7 @@ func main() {
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           logRequests(mux),
-		ReadHeaderTimeout: 15 * time.Second,
+		ReadHeaderTimeout: 1200 * time.Second,
 		// No WriteTimeout to allow long-running streams
 	}
 
