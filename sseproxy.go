@@ -138,6 +138,8 @@ func main() {
 		up.Path = strings.TrimRight(baseURL.Path, "/") + r.URL.Path
 		up.RawQuery = r.URL.RawQuery
 
+		log.Printf("upstream URL: %s, streaming: %t, body size: %d", up.String(), streaming, len(bodyBytes))
+
 		// Prepare upstream request
 		upReq, err := http.NewRequestWithContext(r.Context(), r.Method, up.String(), bytes.NewReader(bodyBytes))
 		if err != nil {
@@ -218,15 +220,17 @@ func main() {
 		upErrCh := make(chan error, 1)
 
 		go func() {
-			// Optional: limit time to get response headers (connect + headers).
-			uctx, cancel := context.WithTimeout(r.Context(), 1801*time.Second)
-			defer cancel()
-			req := upReq.WithContext(uctx)
+			// Use original request context for the upstream request
+			// Don't use timeout context as it will cancel body reading
+			req := upReq.WithContext(r.Context())
+			log.Printf("making upstream request to %s", req.URL.String())
 			resp, err := client.Do(req)
 			if err != nil {
+				log.Printf("upstream request failed: %v", err)
 				upErrCh <- err
 				return
 			}
+			log.Printf("upstream request succeeded: status=%d", resp.StatusCode)
 			upRespCh <- resp
 		}()
 
@@ -246,6 +250,8 @@ func main() {
 		case upResp := <-upRespCh:
 			defer upResp.Body.Close()
 
+			log.Printf("upstream response: status=%d, content-type=%s", upResp.StatusCode, upResp.Header.Get("Content-Type"))
+
 			// If upstream non-2xx before any data, emit an error event and exit.
 			if upResp.StatusCode < 200 || upResp.StatusCode >= 300 {
 				errBody, _ := io.ReadAll(io.LimitReader(upResp.Body, 4096))
@@ -261,7 +267,8 @@ func main() {
 
 			// Pipe upstream body → client; mark first upstream byte on first write.
 			fw := &flushingWriter{w: w, flusher: flusher, firstWrite: &firstUpstreamByte}
-			_, copyErr := io.Copy(fw, upResp.Body)
+			bytesWritten, copyErr := io.Copy(fw, upResp.Body)
+			log.Printf("copied %d bytes from upstream, error: %v", bytesWritten, copyErr)
 
 			// Graceful end marker
 			w.Write([]byte(": done\n\n"))
@@ -278,7 +285,7 @@ func main() {
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           logRequests(mux),
-		ReadHeaderTimeout: 120 * time.Second,
+		ReadHeaderTimeout: 15 * time.Second,
 		// No WriteTimeout to allow long-running streams
 	}
 
