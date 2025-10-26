@@ -82,12 +82,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Read client body (we'll reuse it for the upstream request).
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
