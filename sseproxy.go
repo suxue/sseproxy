@@ -66,6 +66,41 @@ type streamProbe struct {
 	Stream *bool `json:"stream"`
 }
 
+// writeStreamingError writes an error in the appropriate format for the API protocol
+func writeStreamingError(w io.Writer, flusher http.Flusher, isOpenAI, isAnthropic bool, errorMsg string, statusCode int) {
+	if isOpenAI {
+		// OpenAI format: data: {"error": {"message": "...", "type": "server_error", "code": "upstream_error"}}
+		payload, _ := json.Marshal(map[string]any{
+			"error": map[string]any{
+				"message": errorMsg,
+				"type":    "server_error",
+				"code":    "upstream_error",
+			},
+		})
+		w.Write([]byte("data: " + string(payload) + "\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+	} else if isAnthropic {
+		// Anthropic format: event: error\ndata: {"type": "error", "error": {"type": "api_error", "message": "..."}}
+		payload, _ := json.Marshal(map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    "api_error",
+				"message": errorMsg,
+			},
+		})
+		w.Write([]byte("event: error\n"))
+		w.Write([]byte("data: " + string(payload) + "\n\n"))
+	} else {
+		// Generic SSE error format for unknown protocols
+		payload, _ := json.Marshal(map[string]any{
+			"error":  errorMsg,
+			"status": statusCode,
+		})
+		w.Write([]byte("event: error\n"))
+		w.Write([]byte("data: " + string(payload) + "\n\n"))
+	}
+	flusher.Flush()
+}
 
 func main() {
 	flag.Parse()
@@ -129,7 +164,11 @@ func main() {
 		up.Path = strings.TrimRight(baseURL.Path, "/") + r.URL.Path
 		up.RawQuery = r.URL.RawQuery
 
-		log.Printf("upstream URL: %s, streaming: %t, body size: %d", up.String(), streaming, len(bodyBytes))
+		// Detect API protocol based on path
+		isOpenAI := strings.HasSuffix(r.URL.Path, "/v1/chat/completions")
+		isAnthropic := strings.HasSuffix(r.URL.Path, "/v1/messages")
+
+		log.Printf("upstream URL: %s, streaming: %t, body size: %d, openai: %t, anthropic: %t", up.String(), streaming, len(bodyBytes), isOpenAI, isAnthropic)
 
 		// Prepare upstream request
 		upReq, err := http.NewRequestWithContext(r.Context(), r.Method, up.String(), bytes.NewReader(bodyBytes))
@@ -222,11 +261,8 @@ func main() {
 			cancel()
 			<-heartbeatDone
 
-			// Surface upstream dial error via SSE event and end.
-			payload, _ := json.Marshal(map[string]string{"error": err.Error()})
-			w.Write([]byte("event: error\n"))
-			w.Write([]byte("data: " + string(payload) + "\n\n"))
-			flusher.Flush()
+			// Surface upstream dial error via SSE event in protocol-specific format
+			writeStreamingError(w, flusher, isOpenAI, isAnthropic, err.Error(), http.StatusBadGateway)
 			return
 
 		case upResp := <-upRespCh:
@@ -241,13 +277,11 @@ func main() {
 			// If upstream non-2xx before any data, emit an error event and exit.
 			if upResp.StatusCode < 200 || upResp.StatusCode >= 300 {
 				errBody, _ := io.ReadAll(io.LimitReader(upResp.Body, 4096))
-				payload, _ := json.Marshal(map[string]any{
-					"status": upResp.StatusCode,
-					"body":   string(errBody),
-				})
-				w.Write([]byte("event: error\n"))
-				w.Write([]byte("data: " + string(payload) + "\n\n"))
-				flusher.Flush()
+				errorMsg := string(errBody)
+				if errorMsg == "" {
+					errorMsg = http.StatusText(upResp.StatusCode)
+				}
+				writeStreamingError(w, flusher, isOpenAI, isAnthropic, errorMsg, upResp.StatusCode)
 				return
 			}
 
