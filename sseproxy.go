@@ -18,9 +18,10 @@ import (
 )
 
 var (
-	hostFlag      = flag.String("host", "0.0.0.0", "Host/IP to listen on")
-	portFlag      = flag.String("port", "8080", "Port to listen on")
-	heartbeatFlag = flag.Duration("heartbeat", 10*time.Second, "SSE heartbeat interval (e.g. 10s)")
+	hostFlag                  = flag.String("host", "0.0.0.0", "Host/IP to listen on")
+	portFlag                  = flag.String("port", "8080", "Port to listen on")
+	heartbeatFlag             = flag.Duration("heartbeat", 10*time.Second, "SSE heartbeat interval (e.g. 10s)")
+	heartbeatNonStreamingFlag = flag.Duration("heartbeat-nonstreaming", 30*time.Second, "Non-streaming keep-alive interval (e.g. 30s)")
 )
 
 var hopByHop = map[string]struct{}{
@@ -180,18 +181,88 @@ func main() {
 		stripHopByHop(upReq.Header)
 
 		if !streaming {
-			upResp, err := client.Do(upReq)
-			if err != nil {
+			// Make upstream request in goroutine to enable keep-alive
+			upRespCh := make(chan *http.Response, 1)
+			upErrCh := make(chan error, 1)
+
+			go func() {
+				log.Printf("making upstream request to %s (non-streaming)", upReq.URL.String())
+				resp, err := client.Do(upReq)
+				if err != nil {
+					log.Printf("upstream request failed: %v", err)
+					upErrCh <- err
+					return
+				}
+				log.Printf("upstream request succeeded: status=%d", resp.StatusCode)
+				upRespCh <- resp
+			}()
+
+			// Wait for upstream error or response
+			select {
+			case <-r.Context().Done():
+				return
+
+			case err := <-upErrCh:
+				// Upstream connection failed before getting response
 				http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
 				return
-			}
-			defer upResp.Body.Close()
 
-			copyHeaders(w.Header(), upResp.Header)
-			stripHopByHop(w.Header())
-			w.WriteHeader(upResp.StatusCode)
-			_, _ = io.Copy(w, upResp.Body)
-			return
+			case upResp := <-upRespCh:
+				defer upResp.Body.Close()
+
+				// Copy headers and write response headers with chunked encoding
+				copyHeaders(w.Header(), upResp.Header)
+				stripHopByHop(w.Header())
+
+				// Force chunked encoding if not explicitly set to enable keep-alive
+				if w.Header().Get("Transfer-Encoding") == "" {
+					w.Header().Set("Transfer-Encoding", "chunked")
+				}
+
+				w.WriteHeader(upResp.StatusCode)
+
+				// Get flusher for keep-alive chunks
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					// No flusher available, fall back to simple copy
+					_, _ = io.Copy(w, upResp.Body)
+					return
+				}
+
+				// Start heartbeat goroutine for empty chunks
+				ctx, cancel := context.WithCancel(r.Context())
+				defer cancel()
+
+				heartbeatDone := make(chan struct{})
+				go func() {
+					defer close(heartbeatDone)
+					t := time.NewTicker(*heartbeatNonStreamingFlag)
+					defer t.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-t.C:
+							// Send empty chunk: "0\r\n\r\n"
+							_, _ = w.Write([]byte("0\r\n\r\n"))
+							flusher.Flush()
+							log.Printf("sent keep-alive empty chunk (non-streaming)")
+						}
+					}
+				}()
+
+				// Copy body from upstream to client
+				bytesWritten, copyErr := io.Copy(w, upResp.Body)
+				log.Printf("copied %d bytes from upstream (non-streaming), error: %v", bytesWritten, copyErr)
+
+				// Stop heartbeat
+				cancel()
+				<-heartbeatDone
+
+				// Final flush
+				flusher.Flush()
+				return
+			}
 		}
 
 		flusher, ok := w.(http.Flusher)

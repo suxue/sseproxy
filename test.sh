@@ -1,1 +1,0 @@
-curl -v -H 'accept: */*'  -H 'content-type: application/json' -H 'user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)' --compressed  -X POST http://127.0.0.1:6292/v1/chat/completions -d '{"model":"gemini-2.5-flash","temperature":1,"messages":[{"role":"user","content":"刘德华是谁"}],"stream":true,"stream_options":{"include_usage":true}}'

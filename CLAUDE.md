@@ -37,8 +37,16 @@ curl -v -H 'content-type: application/json' \
 
 ## Key Behaviors
 
+### Streaming Mode
 - SSE detection: `"stream": true` in JSON body OR `Accept: text/event-stream` header
 - Immediate SSE headers sent to client before upstream connection
-- Heartbeat pings (`": ping\n\n"`) sent while waiting for upstream
+- Heartbeat pings (`": ping\n\n"`) sent while waiting for upstream response
 - Complete upstream response streamed to client
 - Graceful end marker (`": done\n\n"`) after upstream closes
+
+### Non-Streaming Mode
+- Waits for upstream response headers to preserve status code
+- Enables chunked transfer encoding for keep-alive support
+- Sends empty chunks (`0\r\n\r\n`) periodically during body transfer
+- Configurable interval via `-heartbeat-nonstreaming` flag (default 30s)
+- Keeps connections alive through proxies (CloudFlare, etc.) during slow/large body transfers

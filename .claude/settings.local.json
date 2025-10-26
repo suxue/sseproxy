@@ -12,7 +12,10 @@
       "Bash(git rm:*)",
       "Bash(git commit:*)",
       "Bash(./sseproxy:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(chmod:*)",
+      "Bash(./test_nonstreaming_keepalive.sh:*)",
+      "Bash(./test_slow_body.sh:*)"
     ],
     "deny": []
   }
