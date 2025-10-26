@@ -18,7 +18,6 @@ import (
 )
 
 var (
-	upstreamFlag  = flag.String("upstream", "", "Upstream origin base URL (e.g. https://api.openai.com)")
 	hostFlag      = flag.String("host", "0.0.0.0", "Host/IP to listen on")
 	portFlag      = flag.String("port", "8080", "Port to listen on")
 	heartbeatFlag = flag.Duration("heartbeat", 10*time.Second, "SSE heartbeat interval (e.g. 10s)")
@@ -70,14 +69,6 @@ type streamProbe struct {
 
 func main() {
 	flag.Parse()
-	if *upstreamFlag == "" {
-		log.Println("error: -upstream is required, e.g. -upstream https://api.openai.com")
-		os.Exit(2)
-	}
-	baseURL, err := url.Parse(*upstreamFlag)
-	if err != nil {
-		log.Fatalf("invalid upstream URL: %v", err)
-	}
 
 	// HTTP client for upstream. Disable redirects to avoid accidental replays.
 	client := &http.Client{
@@ -97,13 +88,33 @@ func main() {
 			return
 		}
 
-		// Read client body (we’ll reuse it for the upstream request).
+		// Read client body (we'll reuse it for the upstream request).
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "failed to read body", http.StatusBadRequest)
 			return
 		}
 		_ = r.Body.Close()
+
+		// Get upstream host from header
+		upstreamHost := r.Header.Get("X-Upstream-Host")
+		if upstreamHost == "" {
+			http.Error(w, "X-Upstream-Host header is required", http.StatusBadRequest)
+			return
+		}
+
+		// Parse upstream host - support both full URLs and host:port format
+		var baseURL *url.URL
+		if strings.HasPrefix(upstreamHost, "http://") || strings.HasPrefix(upstreamHost, "https://") {
+			baseURL, err = url.Parse(upstreamHost)
+		} else {
+			// Default to http:// for host:port format
+			baseURL, err = url.Parse("http://" + upstreamHost)
+		}
+		if err != nil || baseURL.Host == "" {
+			http.Error(w, "invalid X-Upstream-Host header: "+upstreamHost, http.StatusBadRequest)
+			return
+		}
 
 		// Detect streaming in a minimal way.
 		streaming := false
@@ -270,7 +281,7 @@ func main() {
 
 	// Graceful shutdown
 	go func() {
-		log.Printf("SSE keepalive proxy listening on http://%s -> upstream %s (heartbeat=%s)", addr, baseURL.String(), heartbeatFlag.String())
+		log.Printf("SSE keepalive proxy listening on http://%s (HTTP proxy mode, heartbeat=%s)", addr, heartbeatFlag.String())
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}

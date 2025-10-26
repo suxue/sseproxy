@@ -9,12 +9,13 @@ go build sseproxy.go
 
 ### Run with Debug Logging
 ```bash
-SSEPROXY_DUMP=1 ./sseproxy -upstream http://127.0.0.1:9292 -host 127.0.0.1 -port 6292
+SSEPROXY_DUMP=1 ./sseproxy -host 127.0.0.1 -port 6292
 ```
 
 ### Test SSE Streaming
 ```bash
 curl -v -H 'accept: */*' -H 'content-type: application/json' \
+  -H 'X-Upstream-Host: localhost:8523' \
   -X POST http://127.0.0.1:6292/v1/chat/completions \
   -d '{"model":"test","stream":true,"messages":[{"role":"user","content":"hello"}]}'
 ```
@@ -22,6 +23,7 @@ curl -v -H 'accept: */*' -H 'content-type: application/json' \
 ### Test Non-Streaming
 ```bash
 curl -v -H 'content-type: application/json' \
+  -H 'X-Upstream-Host: localhost:8523' \
   -X POST http://127.0.0.1:6292/v1/chat/completions \
   -d '{"model":"test","stream":false,"messages":[{"role":"user","content":"hello"}]}'
 ```

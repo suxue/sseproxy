@@ -6,12 +6,11 @@ A simple HTTP proxy for Server-Sent Events (SSE) streaming endpoints with keepal
 
 ```bash
 go build sseproxy.go
-./sseproxy -upstream <upstream_url> -host <host> -port <port>
+./sseproxy -host <host> -port <port>
 ```
 
 ### Options
 
-- `-upstream`: Upstream server URL (required, e.g., `https://api.openai.com`)
 - `-host`: Host/IP to listen on (default: `0.0.0.0`)
 - `-port`: Port to listen on (default: `8080`)
 - `-heartbeat`: SSE heartbeat interval (default: `10s`)
@@ -19,7 +18,34 @@ go build sseproxy.go
 ### Example
 
 ```bash
-./sseproxy -upstream http://127.0.0.1:9292 -host 127.0.0.1 -port 6292
+# Start the proxy
+./sseproxy -host 127.0.0.1 -port 6292
+
+# Make a request with the upstream host specified in the X-Upstream-Host header
+curl -v -H 'content-type: application/json' \
+  -H 'X-Upstream-Host: localhost:8523' \
+  -X POST http://127.0.0.1:6292/v1/chat/completions \
+  -d '{"model":"test","stream":false,"messages":[{"role":"user","content":"hello"}]}'
+```
+
+### X-Upstream-Host Header
+
+The proxy requires the `X-Upstream-Host` header to specify the target upstream server for each request. The header value can be in one of these formats:
+
+- **Full URL with scheme**: `http://localhost:8523` or `https://api.openai.com`
+- **Host and port**: `localhost:8523` or `192.168.1.100:3000` (defaults to `http://`)
+- **Hostname only**: `api.openai.com` (defaults to `http://`, port 80)
+
+Examples:
+```bash
+# Local development server
+-H 'X-Upstream-Host: localhost:8523'
+
+# Remote API with HTTPS
+-H 'X-Upstream-Host: https://api.openai.com'
+
+# IP address with custom port
+-H 'X-Upstream-Host: 192.168.1.100:3000'
 ```
 
 ## Features
